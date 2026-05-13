@@ -60,3 +60,19 @@ Run:
 
     docker compose config
     docker compose up --build
+
+## Scanner documentation
+
+See:
+
+docs/scanner.md
+
+## Current prototype rules
+
+The current scanner includes a small built-in rule engine:
+
+- todo-comment
+- unsafe-usage
+- possible-secret
+
+These are prototype rules and are expected to become configurable in later phases.
