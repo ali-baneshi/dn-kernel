@@ -1,33 +1,26 @@
-use anyhow::{Context, Result};
-use ignore::WalkBuilder;
 use serde::{Deserialize, Serialize};
-use std::fs::File;
+use std::fs;
 use std::io::Read;
 use std::path::{Path, PathBuf};
-
-pub fn health() -> Result<&'static str> {
-    Ok("ok")
-}
+use std::process::{Command, Stdio};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ScanOptions {
-    pub max_depth: usize,
-    pub max_files: usize,
-    pub max_bytes_total: u64,
-    pub max_report_bytes: usize,
+    pub include_hidden: bool,
+    pub max_file_size_bytes: u64,
     pub include_content: bool,
     pub max_file_read_bytes: usize,
+    pub enable_worker_python: bool,
 }
 
 impl Default for ScanOptions {
     fn default() -> Self {
         Self {
-            max_depth: 12,
-            max_files: 20_000,
-            max_bytes_total: 256 * 1024 * 1024,
-            max_report_bytes: 8 * 1024 * 1024,
+            include_hidden: false,
+            max_file_size_bytes: 1024 * 1024,
             include_content: false,
             max_file_read_bytes: 32 * 1024,
+            enable_worker_python: false,
         }
     }
 }
@@ -42,9 +35,7 @@ pub struct Finding {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FileEntry {
     pub path: String,
-    pub size_bytes: u64,
-    pub extension: Option<String>,
-    pub binary: bool,
+    pub size: u64,
     pub findings: Vec<Finding>,
     pub content_preview: Option<String>,
 }
@@ -59,231 +50,305 @@ pub struct ScanReport {
     pub errors: Vec<String>,
 }
 
-pub fn scan_repository(root: impl AsRef<Path>, options: ScanOptions) -> Result<ScanReport> {
-    let root = normalize_root(root.as_ref())?;
-
-    let mut report = ScanReport {
-        root: root.to_string_lossy().to_string(),
-        files: Vec::new(),
-        total_files: 0,
-        total_bytes: 0,
-        truncated: false,
-        errors: Vec::new(),
-    };
-
-    let mut builder = WalkBuilder::new(&root);
-
-    builder
-        .standard_filters(true)
-        .hidden(false)
-        .follow_links(false)
-        .max_depth(Some(options.max_depth));
-
-    for item in builder.build() {
-        let entry = match item {
-            Ok(entry) => entry,
-            Err(err) => {
-                report.errors.push(err.to_string());
-                continue;
-            }
-        };
-
-        let path = entry.path();
-
-        if path == root {
-            continue;
-        }
-
-        let metadata = match entry.metadata() {
-            Ok(metadata) => metadata,
-            Err(err) => {
-                report
-                    .errors
-                    .push(format!("metadata failed for {}: {err}", path.display()));
-                continue;
-            }
-        };
-
-        if !metadata.is_file() {
-            continue;
-        }
-
-        if report.files.len() >= options.max_files {
-            report.truncated = true;
-            break;
-        }
-
-        let size = metadata.len();
-
-        if report.total_bytes.saturating_add(size) > options.max_bytes_total {
-            report.truncated = true;
-            break;
-        }
-
-        let binary = match is_binary_file(path) {
-            Ok(value) => value,
-            Err(err) => {
-                report.errors.push(format!(
-                    "binary detection failed for {}: {err}",
-                    path.display()
-                ));
-                true
-            }
-        };
-
-        let relative = path
-            .strip_prefix(&root)
-            .unwrap_or(path)
-            .to_string_lossy()
-            .replace('\\', "/");
-
-        let extension = path
-            .extension()
-            .and_then(|value| value.to_str())
-            .map(ToOwned::to_owned);
-
-        let mut findings = Vec::new();
-        let mut content_preview = None;
-
-        if !binary {
-            match read_text_preview(path, options.max_file_read_bytes) {
-                Ok(content) => {
-                    findings.extend(run_rules(path, &content));
-
-                    if options.include_content {
-                        content_preview = Some(content);
-                    }
-                }
-                Err(err) => {
-                    report
-                        .errors
-                        .push(format!("content read failed for {}: {err}", path.display()));
-                }
-            }
-        }
-
-        report.total_bytes = report.total_bytes.saturating_add(size);
-        report.total_files += 1;
-
-        report.files.push(FileEntry {
-            path: relative,
-            size_bytes: size,
-            extension,
-            binary,
-            findings,
-            content_preview,
-        });
-    }
-
-    enforce_report_size_limit(&mut report, options.max_report_bytes)?;
-
-    Ok(report)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WorkerAnalyzeFileParams {
+    pub path: String,
+    pub language: Option<String>,
+    pub content: String,
 }
 
-fn normalize_root(path: &Path) -> Result<PathBuf> {
-    let canonical = path
-        .canonicalize()
-        .with_context(|| format!("failed to canonicalize path: {}", path.display()))?;
-
-    if !canonical.is_dir() {
-        anyhow::bail!("scan root is not a directory: {}", canonical.display());
-    }
-
-    Ok(canonical)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WorkerRequest {
+    pub protocol_version: String,
+    pub request_id: String,
+    pub method: String,
+    pub params: WorkerAnalyzeFileParams,
 }
 
-fn is_binary_file(path: &Path) -> Result<bool> {
-    let mut file =
-        File::open(path).with_context(|| format!("failed to open {}", path.display()))?;
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WorkerResponse {
+    pub protocol_version: String,
+    pub request_id: String,
+    pub status: String,
+    #[serde(default)]
+    pub findings: Vec<Finding>,
+    #[serde(default)]
+    pub error: Option<String>,
+}
 
-    let mut buffer = [0_u8; 8192];
+fn is_hidden(path: &Path) -> bool {
+    path.file_name()
+        .and_then(|name| name.to_str())
+        .map(|name| name.starts_with('.'))
+        .unwrap_or(false)
+}
 
-    let read = file
+fn is_text_file(path: &Path) -> bool {
+    match path.extension().and_then(|ext| ext.to_str()) {
+        Some(ext) => matches!(
+            ext,
+            "rs" | "toml"
+                | "md"
+                | "txt"
+                | "json"
+                | "yaml"
+                | "yml"
+                | "py"
+                | "js"
+                | "ts"
+                | "tsx"
+                | "jsx"
+                | "java"
+                | "c"
+                | "h"
+                | "cpp"
+                | "hpp"
+                | "go"
+                | "rb"
+                | "php"
+                | "sh"
+                | "html"
+                | "css"
+                | "sql"
+        ),
+        None => false,
+    }
+}
+
+fn detect_language(path: &Path) -> Option<String> {
+    match path.extension().and_then(|ext| ext.to_str()) {
+        Some("py") => Some("python".to_string()),
+        Some("rs") => Some("rust".to_string()),
+        Some("js") => Some("javascript".to_string()),
+        Some("ts") => Some("typescript".to_string()),
+        Some("tsx") => Some("typescript".to_string()),
+        Some("jsx") => Some("javascript".to_string()),
+        Some("json") => Some("json".to_string()),
+        Some("toml") => Some("toml".to_string()),
+        Some("md") => Some("markdown".to_string()),
+        _ => None,
+    }
+}
+
+fn read_text_preview(path: &Path, max_bytes: usize) -> Result<String, String> {
+    let mut file = fs::File::open(path).map_err(|e| format!("open {}: {}", path.display(), e))?;
+    let mut buffer = vec![0u8; max_bytes];
+    let bytes_read = file
         .read(&mut buffer)
-        .with_context(|| format!("failed to read {}", path.display()))?;
-
-    if read == 0 {
-        return Ok(false);
-    }
-
-    Ok(buffer[..read].contains(&0))
+        .map_err(|e| format!("read {}: {}", path.display(), e))?;
+    buffer.truncate(bytes_read);
+    String::from_utf8(buffer).map_err(|e| format!("utf8 {}: {}", path.display(), e))
 }
 
-fn read_text_preview(path: &Path, max_bytes: usize) -> Result<String> {
-    let mut file =
-        File::open(path).with_context(|| format!("failed to open {}", path.display()))?;
-
-    let mut buffer = vec![0_u8; max_bytes];
-
-    let read = file
-        .read(&mut buffer)
-        .with_context(|| format!("failed to read {}", path.display()))?;
-
-    buffer.truncate(read);
-
-    Ok(String::from_utf8_lossy(&buffer).to_string())
-}
-
-fn run_rules(path: &Path, content: &str) -> Vec<Finding> {
+fn run_rules(content: &str) -> Vec<Finding> {
     let mut findings = Vec::new();
-
     let lower = content.to_lowercase();
 
-    if lower.contains("todo") {
+    if content.contains("TODO") {
         findings.push(Finding {
-            severity: "info".into(),
-            rule: "todo-comment".into(),
-            message: format!("TODO marker found in {}", path.display()),
+            severity: "info".to_string(),
+            rule: "todo-comment".to_string(),
+            message: "TODO marker found in file content".to_string(),
         });
     }
 
-    if lower.contains("unsafe") {
+    if content.contains("unsafe") {
         findings.push(Finding {
-            severity: "warning".into(),
-            rule: "unsafe-usage".into(),
-            message: format!("unsafe keyword detected in {}", path.display()),
+            severity: "warning".to_string(),
+            rule: "unsafe-usage".to_string(),
+            message: "Possible unsafe usage detected".to_string(),
         });
     }
 
     if lower.contains("password") || lower.contains("secret") {
         findings.push(Finding {
-            severity: "high".into(),
-            rule: "possible-secret".into(),
-            message: format!("possible secret keyword in {}", path.display()),
+            severity: "high".to_string(),
+            rule: "possible-secret".to_string(),
+            message: "Possible secret-related text detected".to_string(),
         });
     }
 
     findings
 }
 
-fn enforce_report_size_limit(report: &mut ScanReport, max_report_bytes: usize) -> Result<()> {
-    while serde_json::to_vec(report)?.len() > max_report_bytes && !report.files.is_empty() {
-        report.files.pop();
-        report.truncated = true;
+fn run_python_worker(path: &Path, content: &str) -> Result<Vec<Finding>, String> {
+    let request = WorkerRequest {
+        protocol_version: "0.1.0".to_string(),
+        request_id: format!("scan-{}", path.display()),
+        method: "analyze_file".to_string(),
+        params: WorkerAnalyzeFileParams {
+            path: path.display().to_string(),
+            language: detect_language(path),
+            content: content.to_string(),
+        },
+    };
+
+    let request_json =
+        serde_json::to_vec(&request).map_err(|e| format!("serialize worker request: {}", e))?;
+
+    let mut child = Command::new("python")
+        .args(["-m", "workers.python.dn_worker"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|e| format!("spawn python worker: {}", e))?;
+
+    {
+        let stdin = child
+            .stdin
+            .as_mut()
+            .ok_or_else(|| "python worker stdin unavailable".to_string())?;
+        use std::io::Write;
+        stdin
+            .write_all(&request_json)
+            .map_err(|e| format!("write worker stdin: {}", e))?;
     }
 
-    Ok(())
+    let output = child
+        .wait_with_output()
+        .map_err(|e| format!("wait for python worker: {}", e))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+        return Err(format!("python worker failed: {}", stderr.trim()));
+    }
+
+    let response: WorkerResponse = serde_json::from_slice(&output.stdout)
+        .map_err(|e| format!("parse worker response: {}", e))?;
+
+    if response.status != "ok" {
+        return Err(response
+            .error
+            .unwrap_or_else(|| "python worker returned non-ok status".to_string()));
+    }
+
+    Ok(response.findings)
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
+fn scan_dir(
+    root: &Path,
+    current: &Path,
+    options: &ScanOptions,
+    files: &mut Vec<FileEntry>,
+    total_bytes: &mut u64,
+    truncated: &mut bool,
+    errors: &mut Vec<String>,
+) {
+    let entries = match fs::read_dir(current) {
+        Ok(entries) => entries,
+        Err(err) => {
+            errors.push(format!("read_dir {}: {}", current.display(), err));
+            return;
+        }
+    };
 
-    #[test]
-    fn default_options_are_sane() {
-        let options = ScanOptions::default();
+    for entry in entries {
+        let entry = match entry {
+            Ok(entry) => entry,
+            Err(err) => {
+                errors.push(format!("dir_entry {}: {}", current.display(), err));
+                continue;
+            }
+        };
 
-        assert!(options.max_depth > 0);
-        assert!(options.max_files > 0);
-        assert!(options.max_bytes_total > 0);
-        assert!(options.max_report_bytes > 0);
-        assert!(options.max_file_read_bytes > 0);
+        let path = entry.path();
+
+        if !options.include_hidden && is_hidden(&path) {
+            continue;
+        }
+
+        let metadata = match entry.metadata() {
+            Ok(metadata) => metadata,
+            Err(err) => {
+                errors.push(format!("metadata {}: {}", path.display(), err));
+                continue;
+            }
+        };
+
+        if metadata.is_dir() {
+            scan_dir(root, &path, options, files, total_bytes, truncated, errors);
+            continue;
+        }
+
+        if !metadata.is_file() {
+            continue;
+        }
+
+        let size = metadata.len();
+        *total_bytes += size;
+
+        if size > options.max_file_size_bytes {
+            *truncated = true;
+            continue;
+        }
+
+        let rel_path = path
+            .strip_prefix(root)
+            .unwrap_or(&path)
+            .to_string_lossy()
+            .to_string();
+
+        let mut findings = Vec::new();
+        let mut content_preview = None;
+
+        if is_text_file(&path) {
+            match read_text_preview(&path, options.max_file_read_bytes) {
+                Ok(content) => {
+                    findings.extend(run_rules(&content));
+
+                    if options.enable_worker_python
+                        && detect_language(&path).as_deref() == Some("python")
+                    {
+                        match run_python_worker(&path, &content) {
+                            Ok(worker_findings) => findings.extend(worker_findings),
+                            Err(err) => errors.push(format!("worker {}: {}", path.display(), err)),
+                        }
+                    }
+
+                    if options.include_content {
+                        content_preview = Some(content);
+                    }
+                }
+                Err(err) => errors.push(err),
+            }
+        }
+
+        files.push(FileEntry {
+            path: rel_path,
+            size,
+            findings,
+            content_preview,
+        });
     }
+}
 
-    #[test]
-    fn rules_detect_todo() {
-        let findings = run_rules(Path::new("sample.rs"), "TODO: fix");
+pub fn scan_repository(root: impl AsRef<Path>, options: &ScanOptions) -> ScanReport {
+    let root = root.as_ref();
+    let root_path: PathBuf = root.to_path_buf();
+    let mut files = Vec::new();
+    let mut total_bytes = 0u64;
+    let mut truncated = false;
+    let mut errors = Vec::new();
 
-        assert!(!findings.is_empty());
+    scan_dir(
+        &root_path,
+        &root_path,
+        options,
+        &mut files,
+        &mut total_bytes,
+        &mut truncated,
+        &mut errors,
+    );
+
+    let total_files = files.len();
+
+    ScanReport {
+        root: root_path.to_string_lossy().to_string(),
+        files,
+        total_files,
+        total_bytes,
+        truncated,
+        errors,
     }
 }

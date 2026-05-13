@@ -1,115 +1,86 @@
-use anyhow::Result;
 use clap::{Parser, Subcommand};
-use dn_runtime::{health, scan_repository, ScanOptions};
-use tracing_subscriber::EnvFilter;
+use dn_runtime::{scan_repository, ScanOptions};
 
 #[derive(Parser, Debug)]
 #[command(name = "dn-cli")]
 #[command(version)]
-#[command(about = "dn-kernel command line interface")]
+#[command(about = "Developer-native repository scanner")]
 struct Cli {
-    #[arg(long, global = true, default_value = "info")]
-    log_level: String,
-
     #[command(subcommand)]
-    command: Option<Commands>,
+    command: Commands,
 }
 
 #[derive(Subcommand, Debug)]
 enum Commands {
-    Health,
     Scan {
-        #[arg(default_value = ".")]
         path: String,
 
         #[arg(long)]
         json: bool,
 
         #[arg(long)]
+        hidden: bool,
+
+        #[arg(long)]
         content: bool,
 
-        #[arg(long, default_value_t = 12)]
-        max_depth: usize,
+        #[arg(long, default_value_t = 1024 * 1024)]
+        max_file_size_bytes: u64,
 
-        #[arg(long, default_value_t = 20_000)]
-        max_files: usize,
-
-        #[arg(long, default_value_t = 268_435_456)]
-        max_bytes_total: u64,
-
-        #[arg(long, default_value_t = 8_388_608)]
-        max_report_bytes: usize,
-
-        #[arg(long, default_value_t = 32768)]
+        #[arg(long, default_value_t = 32 * 1024)]
         max_file_read_bytes: usize,
+
+        #[arg(long)]
+        python_worker: bool,
     },
-    Version,
 }
 
-fn main() -> Result<()> {
+fn main() {
     let cli = Cli::parse();
 
-    init_logging(&cli.log_level);
-
     match cli.command {
-        Some(Commands::Health) => {
-            let status = health()?;
-            println!("status={status}");
-        }
-
-        Some(Commands::Scan {
+        Commands::Scan {
             path,
             json,
+            hidden,
             content,
-            max_depth,
-            max_files,
-            max_bytes_total,
-            max_report_bytes,
+            max_file_size_bytes,
             max_file_read_bytes,
-        }) => {
+            python_worker,
+        } => {
             let options = ScanOptions {
-                max_depth,
-                max_files,
-                max_bytes_total,
-                max_report_bytes,
+                include_hidden: hidden,
+                max_file_size_bytes,
                 include_content: content,
                 max_file_read_bytes,
+                enable_worker_python: python_worker,
             };
 
-            let report = scan_repository(path, options)?;
+            let report = scan_repository(path, &options);
 
             if json {
-                println!("{}", serde_json::to_string_pretty(&report)?);
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&report).expect("serialize scan report")
+                );
             } else {
+                let findings_count: usize =
+                    report.files.iter().map(|file| file.findings.len()).sum();
+
                 println!("root={}", report.root);
                 println!("files={}", report.total_files);
                 println!("bytes={}", report.total_bytes);
                 println!("truncated={}", report.truncated);
                 println!("errors={}", report.errors.len());
+                println!("findings={}", findings_count);
 
-                let findings: usize = report.files.iter().map(|f| f.findings.len()).sum();
-
-                println!("findings={findings}");
+                if !report.errors.is_empty() {
+                    println!("error_details:");
+                    for error in &report.errors {
+                        println!("  - {}", error);
+                    }
+                }
             }
         }
-
-        Some(Commands::Version) => {
-            println!("{}", env!("CARGO_PKG_VERSION"));
-        }
-
-        None => {
-            println!("dn-cli ready");
-        }
     }
-
-    Ok(())
-}
-
-fn init_logging(level: &str) {
-    let filter = EnvFilter::try_new(level).unwrap_or_else(|_| EnvFilter::new("info"));
-
-    let _ = tracing_subscriber::fmt()
-        .with_env_filter(filter)
-        .with_target(false)
-        .try_init();
 }
