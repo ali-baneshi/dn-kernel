@@ -56,6 +56,10 @@ def analyze_file(request):
 
 
 def main():
+    if sys.stdin.isatty():
+        print(json.dumps(ready_payload()))
+        return
+
     raw = sys.stdin.read()
 
     if not raw.strip():

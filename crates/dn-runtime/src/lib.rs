@@ -352,3 +352,40 @@ pub fn scan_repository(root: impl AsRef<Path>, options: &ScanOptions) -> ScanRep
         errors,
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn run_rules_detects_todo_unsafe_and_secret() {
+        let content = "TODO: fix this\nunsafe { }\npassword=123\nsecret token\n";
+        let findings = run_rules(content);
+
+        assert!(findings.iter().any(|f| f.rule == "todo-comment"));
+        assert!(findings.iter().any(|f| f.rule == "unsafe-usage"));
+        assert!(findings.iter().any(|f| f.rule == "possible-secret"));
+    }
+
+    #[test]
+    fn detect_language_recognizes_python() {
+        let lang = detect_language(Path::new("example.py"));
+        assert_eq!(lang.as_deref(), Some("python"));
+    }
+
+    #[test]
+    fn detect_language_returns_none_for_unknown_extension() {
+        let lang = detect_language(Path::new("example.unknown"));
+        assert_eq!(lang, None);
+    }
+
+    #[test]
+    fn is_text_file_recognizes_python_file() {
+        assert!(is_text_file(Path::new("script.py")));
+    }
+
+    #[test]
+    fn is_text_file_rejects_unknown_extension() {
+        assert!(!is_text_file(Path::new("archive.bin")));
+    }
+}
