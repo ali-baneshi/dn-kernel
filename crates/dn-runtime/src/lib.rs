@@ -51,6 +51,7 @@ pub struct ScanReport {
     pub total_files: usize,
     pub total_bytes: u64,
     pub truncated: bool,
+    pub skipped_large_files: usize,
     pub errors: Vec<String>,
 }
 
@@ -243,6 +244,7 @@ fn scan_dir(
     files: &mut Vec<FileEntry>,
     total_bytes: &mut u64,
     truncated: &mut bool,
+    skipped_large_files: &mut usize,
     errors: &mut Vec<String>,
 ) {
     let entries = match fs::read_dir(current) {
@@ -277,7 +279,16 @@ fn scan_dir(
         };
 
         if metadata.is_dir() {
-            scan_dir(root, &path, options, files, total_bytes, truncated, errors);
+            scan_dir(
+                root,
+                &path,
+                options,
+                files,
+                total_bytes,
+                truncated,
+                skipped_large_files,
+                errors,
+            );
             continue;
         }
 
@@ -290,6 +301,7 @@ fn scan_dir(
 
         if size > options.max_file_size_bytes {
             *truncated = true;
+            *skipped_large_files += 1;
             continue;
         }
 
@@ -339,6 +351,7 @@ pub fn scan_repository(root: impl AsRef<Path>, options: &ScanOptions) -> ScanRep
     let mut files = Vec::new();
     let mut total_bytes = 0u64;
     let mut truncated = false;
+    let mut skipped_large_files = 0usize;
     let mut errors = Vec::new();
 
     scan_dir(
@@ -348,6 +361,7 @@ pub fn scan_repository(root: impl AsRef<Path>, options: &ScanOptions) -> ScanRep
         &mut files,
         &mut total_bytes,
         &mut truncated,
+        &mut skipped_large_files,
         &mut errors,
     );
 
@@ -359,6 +373,7 @@ pub fn scan_repository(root: impl AsRef<Path>, options: &ScanOptions) -> ScanRep
         total_files,
         total_bytes,
         truncated,
+        skipped_large_files,
         errors,
     }
 }

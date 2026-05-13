@@ -71,6 +71,7 @@ fn main() {
                 println!("files={}", report.total_files);
                 println!("bytes={}", report.total_bytes);
                 println!("truncated={}", report.truncated);
+                println!("skipped_large_files={}", report.skipped_large_files);
                 println!("errors={}", report.errors.len());
                 println!("findings={}", findings_count);
 
