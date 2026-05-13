@@ -25,6 +25,9 @@ enum Commands {
         #[arg(long)]
         json: bool,
 
+        #[arg(long)]
+        content: bool,
+
         #[arg(long, default_value_t = 12)]
         max_depth: usize,
 
@@ -36,6 +39,9 @@ enum Commands {
 
         #[arg(long, default_value_t = 8_388_608)]
         max_report_bytes: usize,
+
+        #[arg(long, default_value_t = 32768)]
+        max_file_read_bytes: usize,
     },
     Version,
 }
@@ -50,19 +56,24 @@ fn main() -> Result<()> {
             let status = health()?;
             println!("status={status}");
         }
+
         Some(Commands::Scan {
             path,
             json,
+            content,
             max_depth,
             max_files,
             max_bytes_total,
             max_report_bytes,
+            max_file_read_bytes,
         }) => {
             let options = ScanOptions {
                 max_depth,
                 max_files,
                 max_bytes_total,
                 max_report_bytes,
+                include_content: content,
+                max_file_read_bytes,
             };
 
             let report = scan_repository(path, options)?;
@@ -75,17 +86,19 @@ fn main() -> Result<()> {
                 println!("bytes={}", report.total_bytes);
                 println!("truncated={}", report.truncated);
                 println!("errors={}", report.errors.len());
+
+                let findings: usize = report.files.iter().map(|f| f.findings.len()).sum();
+
+                println!("findings={findings}");
             }
         }
+
         Some(Commands::Version) => {
             println!("{}", env!("CARGO_PKG_VERSION"));
         }
+
         None => {
             println!("dn-cli ready");
-            println!("try:");
-            println!("  dn-cli health");
-            println!("  dn-cli scan .");
-            println!("  dn-cli scan . --json");
         }
     }
 

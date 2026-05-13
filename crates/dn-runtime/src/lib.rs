@@ -15,6 +15,8 @@ pub struct ScanOptions {
     pub max_files: usize,
     pub max_bytes_total: u64,
     pub max_report_bytes: usize,
+    pub include_content: bool,
+    pub max_file_read_bytes: usize,
 }
 
 impl Default for ScanOptions {
@@ -24,8 +26,17 @@ impl Default for ScanOptions {
             max_files: 20_000,
             max_bytes_total: 256 * 1024 * 1024,
             max_report_bytes: 8 * 1024 * 1024,
+            include_content: false,
+            max_file_read_bytes: 32 * 1024,
         }
     }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Finding {
+    pub severity: String,
+    pub rule: String,
+    pub message: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -34,6 +45,8 @@ pub struct FileEntry {
     pub size_bytes: u64,
     pub extension: Option<String>,
     pub binary: bool,
+    pub findings: Vec<Finding>,
+    pub content_preview: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -59,6 +72,7 @@ pub fn scan_repository(root: impl AsRef<Path>, options: ScanOptions) -> Result<S
     };
 
     let mut builder = WalkBuilder::new(&root);
+
     builder
         .standard_filters(true)
         .hidden(false)
@@ -128,13 +142,36 @@ pub fn scan_repository(root: impl AsRef<Path>, options: ScanOptions) -> Result<S
             .and_then(|value| value.to_str())
             .map(ToOwned::to_owned);
 
+        let mut findings = Vec::new();
+        let mut content_preview = None;
+
+        if !binary {
+            match read_text_preview(path, options.max_file_read_bytes) {
+                Ok(content) => {
+                    findings.extend(run_rules(path, &content));
+
+                    if options.include_content {
+                        content_preview = Some(content);
+                    }
+                }
+                Err(err) => {
+                    report
+                        .errors
+                        .push(format!("content read failed for {}: {err}", path.display()));
+                }
+            }
+        }
+
         report.total_bytes = report.total_bytes.saturating_add(size);
         report.total_files += 1;
+
         report.files.push(FileEntry {
             path: relative,
             size_bytes: size,
             extension,
             binary,
+            findings,
+            content_preview,
         });
     }
 
@@ -158,7 +195,9 @@ fn normalize_root(path: &Path) -> Result<PathBuf> {
 fn is_binary_file(path: &Path) -> Result<bool> {
     let mut file =
         File::open(path).with_context(|| format!("failed to open {}", path.display()))?;
+
     let mut buffer = [0_u8; 8192];
+
     let read = file
         .read(&mut buffer)
         .with_context(|| format!("failed to read {}", path.display()))?;
@@ -168,6 +207,53 @@ fn is_binary_file(path: &Path) -> Result<bool> {
     }
 
     Ok(buffer[..read].contains(&0))
+}
+
+fn read_text_preview(path: &Path, max_bytes: usize) -> Result<String> {
+    let mut file =
+        File::open(path).with_context(|| format!("failed to open {}", path.display()))?;
+
+    let mut buffer = vec![0_u8; max_bytes];
+
+    let read = file
+        .read(&mut buffer)
+        .with_context(|| format!("failed to read {}", path.display()))?;
+
+    buffer.truncate(read);
+
+    Ok(String::from_utf8_lossy(&buffer).to_string())
+}
+
+fn run_rules(path: &Path, content: &str) -> Vec<Finding> {
+    let mut findings = Vec::new();
+
+    let lower = content.to_lowercase();
+
+    if lower.contains("todo") {
+        findings.push(Finding {
+            severity: "info".into(),
+            rule: "todo-comment".into(),
+            message: format!("TODO marker found in {}", path.display()),
+        });
+    }
+
+    if lower.contains("unsafe") {
+        findings.push(Finding {
+            severity: "warning".into(),
+            rule: "unsafe-usage".into(),
+            message: format!("unsafe keyword detected in {}", path.display()),
+        });
+    }
+
+    if lower.contains("password") || lower.contains("secret") {
+        findings.push(Finding {
+            severity: "high".into(),
+            rule: "possible-secret".into(),
+            message: format!("possible secret keyword in {}", path.display()),
+        });
+    }
+
+    findings
 }
 
 fn enforce_report_size_limit(report: &mut ScanReport, max_report_bytes: usize) -> Result<()> {
@@ -186,9 +272,18 @@ mod tests {
     #[test]
     fn default_options_are_sane() {
         let options = ScanOptions::default();
+
         assert!(options.max_depth > 0);
         assert!(options.max_files > 0);
         assert!(options.max_bytes_total > 0);
         assert!(options.max_report_bytes > 0);
+        assert!(options.max_file_read_bytes > 0);
+    }
+
+    #[test]
+    fn rules_detect_todo() {
+        let findings = run_rules(Path::new("sample.rs"), "TODO: fix");
+
+        assert!(!findings.is_empty());
     }
 }
