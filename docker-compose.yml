@@ -1,0 +1,6 @@
+services:
+  dn-cli:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+    command: ["cargo", "run", "-p", "dn-cli", "--", "health"]
