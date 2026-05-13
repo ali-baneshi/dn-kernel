@@ -1,8 +1,12 @@
+pub mod worker;
+
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+
+use crate::worker::registry::WorkerRegistry;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ScanOptions {
@@ -186,8 +190,14 @@ fn run_python_worker(path: &Path, content: &str) -> Result<Vec<Finding>, String>
     let request_json =
         serde_json::to_vec(&request).map_err(|e| format!("serialize worker request: {}", e))?;
 
-    let mut child = Command::new("python")
-        .args(["-m", "workers.python.dn_worker"])
+    let registry = WorkerRegistry::new();
+
+    let config = registry
+        .get("python")
+        .ok_or_else(|| "python worker not registered".to_string())?;
+
+    let mut child = Command::new(&config.command)
+        .args(&config.args)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
