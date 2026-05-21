@@ -1,43 +1,51 @@
-# Architecture
+# Runtime Architecture
 
-## High-level flow
+`dn-kernel` is separated into a small CLI and a reusable runtime crate.
 
-1. CLI parses command and arguments
-2. Runtime loads configuration and prepares a job directory
-3. Runtime serializes a request envelope
-4. Runtime launches the Python worker
-5. Worker scans and analyzes the repository
-6. Worker optionally asks a local-compatible LLM for a concise summary
-7. Worker returns structured JSON
-8. Runtime stores job artifacts and prints a result
+## Components
 
-## Design principles
+- `apps/dn-cli`
+  - parses commands and flags
+  - loads profile suggestions for unknown-profile hints
+  - renders report formats
+- `crates/dn-runtime`
+  - loads and merges profiles
+  - walks files with ignore-aware traversal
+  - runs deterministic rules
+  - orchestrates optional worker and provider steps
+  - generates structured report
+- `crates/dn-ipc`
+  - shared request/response data models for workers
+- `workers/python`
+  - external language worker implementation
 
-- Local-first execution
-- Deterministic output paths
-- Process isolation between supervisor and worker
-- Schema-based IPC contracts
-- Bounded resource usage
-- Extensible plugin-ready worker layout
+## Data flow
 
-## Transport
+1. CLI selects root + profile + output mode.
+2. Runtime resolves profile (builtin / local file / explicit path) and applies inheritance.
+3. Scanner builds include/exclude selectors and walks files.
+4. Each candidate file is:
+   - filtered by include/exclude
+   - filtered out when not text/binary policy allows
+   - skipped if too large or over global limits
+   - read and analyzed by local rules
+   - optionally analyzed by worker when suspicious patterns match
+   - optionally analyzed by provider when enabled
+5. Findings are merged, sorted, counted, and serialized into a `ScanReport`.
 
-- Stdio
-- One JSON request line
-- One JSON response line
+## Extensibility points
 
-## Artifact layout
+- Add deterministic checks in `run_local_rules`.
+- Add new runtime workers via `WorkerRegistry`/`WorkerSession` and keep protocol compatibility with `crates/dn-ipc`.
+- Add providers in `crates/dn-runtime/src/provider.rs` using `Provider::from_config`.
+- Update docs (`docs/protocol.md`, `docs/providers.md`) alongside any protocol or provider changes.
 
-- `.dn/jobs/<job-id>/request.json`
-- `.dn/jobs/<job-id>/response.json`
-- `.dn/jobs/<job-id>/output/report.md`
-- `.dn/jobs/<job-id>/output/report.json`
+## Extensibility checklist
 
-## Future improvements
+- add parsing + validation tests for new config fields
+- keep default behavior opt-out compatible
+- keep worker/protocol failures non-fatal when possible
+- surface integration mode and failures explicitly in `provider`/`worker` fields
+- add integration coverage under `apps/dn-cli/tests`
 
-- Persistent worker mode
-- Streaming progress
-- Git-aware scanning
-- Ignore file support
-- Plugin manifests
-- Incremental caching
+The worker layer and provider layer remain independent, so workers can exist even when provider is disabled and vice versa.

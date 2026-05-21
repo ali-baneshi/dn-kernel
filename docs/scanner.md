@@ -1,48 +1,54 @@
 # Scanner
 
-The scanner walks a repository and produces a structured report.
+`dn-kernel` scans repositories with predictable policy:
 
-## Current capabilities
+- file selection via include/exclude patterns
+- size/resource limits
+- deterministic local rules
+- optional worker analysis
+- optional provider review
 
-- Respects gitignore and standard ignore files
-- Detects binary files using NUL-byte probing
-- Tracks file path, size, extension, and binary status
-- Supports optional content previews
-- Enforces maximum depth, maximum files, maximum total bytes, and maximum report size
-- Runs a basic built-in rule engine
+## File discovery
 
-## Built-in rules
+Scanning starts at the target root and uses ignore-aware traversal.
+Hidden paths are excluded by default; use `--hidden` to include dotfiles and dot-directories.
 
-Current prototype rules:
+Rules:
 
-- `todo-comment`
-- `unsafe-usage`
-- `possible-secret`
+- `ignore` handles `.gitignore` semantics.
+- `WalkBuilder.hidden` is toggled by effective `include_hidden`.
+- default excluded globs are `target/**`, `node_modules/**`, `.git/**`.
 
-These rules are intentionally simple and will be replaced or extended by a configurable rule engine.
+## Counters and semantics
 
-## Examples
+- `files_discovered`: files that passed include/exclude globs.
+- `files_scanned`: files that were analyzed.
+- `files_selected`: files emitted in `files` output (equivalent to scanned).
+- `files_skipped`: discovered files that were not scanned.
+- `total_files`: compatibility alias of discovered count.
+- `skipped_large_files`: files skipped because `max_file_size_bytes` was exceeded.
+- `truncated`: true when scan terminated due to `max_files` or `max_total_bytes` policy.
 
-Text summary:
-```bash
-cargo run -p dn-cli -- scan .
+## Limits
 
-JSON report:
+Per-profile or CLI-overridden limits:
 
-bash
-cargo run -p dn-cli -- scan . --json
+- `max_file_size_bytes`
+- `max_file_read_bytes`
+- `max_total_bytes`
+- `max_files`
 
-JSON report with content previews:
+These are enforced before expensive analysis.
 
-bash
-cargo run -p dn-cli -- scan . --json --content
+## Content preview
 
-Limit scan depth:
+`--content` (or profile output settings) adds short `content_preview` fields to report entries.
+By default previews are omitted.
 
-bash
-cargo run -p dn-cli -- scan . --max-depth 4
+Security note: previews can leak secrets; this is expected and flagged in docs/help.
 
-Limit number of files:
+## Deterministic vs suspicious checks
 
-bash
-cargo run -p dn-cli -- scan . --max-files 1000
+- Deterministic rules always run against scanned file content (for supported text files).
+- Suspicious checks are pattern-based; worker/provider are only attempted when `suspicious_patterns` matches.
+- provider calls are bounded by `ai.max_ai_files` and content-length.

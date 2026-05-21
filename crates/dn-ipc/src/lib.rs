@@ -16,8 +16,45 @@ pub struct WorkerError {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct WorkerAnalyzeFileParams {
+    pub path: String,
+    pub language: Option<String>,
+    pub content: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct WorkerRequest {
+    pub protocol_version: String,
+    pub request_id: String,
+    pub method: String,
+    pub params: WorkerAnalyzeFileParams,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct WorkerResponse {
+    pub protocol_version: String,
+    pub request_id: String,
+    pub status: String,
+    #[serde(default)]
+    pub findings: Vec<WorkerFinding>,
+    #[serde(default)]
+    pub error: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct WorkerFinding {
+    pub severity: String,
+    pub rule: String,
+    pub message: String,
+    #[serde(default)]
+    pub line: Option<u32>,
+    #[serde(default)]
+    pub category: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "type", rename_all = "snake_case")]
-pub enum WorkerRequest {
+pub enum WorkerRequestEnvelope {
     Hello,
     AnalyzeFile {
         path: String,
@@ -29,16 +66,14 @@ pub enum WorkerRequest {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "type", rename_all = "snake_case")]
-pub enum WorkerResponse {
+pub enum WorkerResponseEnvelope {
     Hello {
         protocol_version: String,
         worker_name: String,
         worker_version: String,
     },
-    Finding {
-        path: String,
-        severity: String,
-        message: String,
+    Ok {
+        findings: Vec<WorkerFinding>,
     },
     Error {
         error: WorkerError,

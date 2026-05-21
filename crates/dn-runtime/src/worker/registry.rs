@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use anyhow::{anyhow, Result};
+use anyhow::Result;
 
 use crate::worker::session::WorkerSession;
 use crate::Finding;
@@ -9,6 +9,8 @@ use crate::Finding;
 pub struct WorkerConfig {
     pub command: String,
     pub args: Vec<String>,
+    pub timeout_ms: u64,
+    pub retries: u32,
 }
 
 pub struct WorkerRegistry {
@@ -17,18 +19,26 @@ pub struct WorkerRegistry {
 }
 
 impl WorkerRegistry {
-    pub fn new() -> Self {
+    pub fn new(worker_timeout_ms: u64, worker_retries: u32) -> Self {
         let mut registry = Self {
             workers: HashMap::new(),
             sessions: HashMap::new(),
         };
 
-        // default python worker
+        let script_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("..")
+            .join("..")
+            .join("workers")
+            .join("python")
+            .join("dn_worker.py");
+
         registry.register(
             "python",
             WorkerConfig {
                 command: "python".to_string(),
-                args: vec!["-m".to_string(), "workers.python.dn_worker".to_string()],
+                args: vec![script_path.to_string_lossy().to_string()],
+                timeout_ms: worker_timeout_ms,
+                retries: worker_retries,
             },
         );
 
@@ -48,22 +58,39 @@ impl WorkerRegistry {
     }
 
     pub fn analyze(&mut self, language: &str, path: &str, content: &str) -> Result<Vec<Finding>> {
-        if !self.sessions.contains_key(language) {
-            let config = self
-                .workers
-                .get(language)
-                .ok_or_else(|| anyhow!("no worker registered for language: {}", language))?
-                .clone();
+        let mut attempts = 0;
+        loop {
+            attempts += 1;
 
-            let session = WorkerSession::new(&config.command, &config.args)?;
-            self.sessions.insert(language.to_string(), session);
+            if !self.sessions.contains_key(language) {
+                let config = self.workers.get(language).ok_or_else(|| {
+                    anyhow::anyhow!("no worker registered for language: {language}")
+                })?;
+
+                let session = WorkerSession::new(&config.command, &config.args)?;
+                self.sessions.insert(language.to_string(), session);
+            }
+
+            let maybe_session = self.sessions.get_mut(language);
+            if let Some(session) = maybe_session {
+                match session.analyze(path, Some(language), content) {
+                    Ok(findings) => return Ok(findings),
+                    Err(err) => {
+                        self.sessions.remove(language);
+                        let retries = self
+                            .workers
+                            .get(language)
+                            .map(|cfg| cfg.retries)
+                            .unwrap_or(0);
+
+                        if attempts > retries + 1 {
+                            return Err(err);
+                        }
+
+                        let _ = retries;
+                    }
+                }
+            }
         }
-
-        let session = self
-            .sessions
-            .get_mut(language)
-            .ok_or_else(|| anyhow!("worker session unavailable for language: {}", language))?;
-
-        session.analyze(path, content)
     }
 }

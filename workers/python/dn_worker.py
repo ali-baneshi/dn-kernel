@@ -43,17 +43,63 @@ def analyze(path, content):
     return findings
 
 
+def respond(payload):
+    print(json.dumps(payload), flush=True)
+
+
+def handle_request(req):
+    # New protocol: WorkerRequest from Rust runtime.
+    if req.get("method") == "analyze_file" and "params" in req:
+        params = req["params"] or {}
+        path = params.get("path", "")
+        content = params.get("content", "")
+        findings = analyze(path, content)
+        return {
+            "protocol_version": req.get("protocol_version", "0.1.0"),
+            "request_id": req.get("request_id", ""),
+            "status": "ok",
+            "findings": findings,
+        }
+
+    # Legacy compatibility for older line based protocol during transition.
+    if "path" in req and "content" in req:
+        path = req.get("path", "")
+        content = req.get("content", "")
+        findings = analyze(path, content)
+        return {
+            "protocol_version": "0.1.0",
+            "request_id": "",
+            "status": "ok",
+            "findings": findings,
+        }
+
+    if req.get("method") == "hello":
+        return {
+            "protocol_version": req.get("protocol_version", "0.1.0"),
+            "request_id": req.get("request_id", ""),
+            "status": "ok",
+            "findings": [],
+        }
+
+    return {
+        "protocol_version": req.get("protocol_version", "0.1.0"),
+        "request_id": req.get("request_id", ""),
+        "status": "error",
+        "findings": [],
+        "error": "unknown request",
+    }
+
+
 for line in sys.stdin:
     line = line.strip()
-
     if not line:
         continue
 
-    req = json.loads(line)
+    try:
+        req = json.loads(line)
+    except Exception as err:
+        respond({"protocol_version": "0.1.0", "request_id": "", "status": "error", "findings": [], "error": str(err)})
+        continue
 
-    result = analyze(
-        req.get("path", ""),
-        req.get("content", "")
-    )
-
-    print(json.dumps(result), flush=True)
+    response = handle_request(req)
+    respond(response)

@@ -1,104 +1,107 @@
+import ast
 import json
 import sys
 
 
-def ready_payload():
-    return {
-        "protocol_version": "0.1.0",
-        "status": "ready",
-        "worker": "python",
-        "worker_version": "0.1.0",
-    }
+PROTOCOL_VERSION = "0.1.0"
 
 
-def analyze_file(request):
-    params = request.get("params", {})
-    path = params.get("path", "")
-    language = params.get("language")
-    content = params.get("content", "")
-
+def analyze(content):
     findings = []
+    try:
+        tree = ast.parse(content)
+    except Exception:
+        return findings
 
-    if language == "python":
-        if "print(" in content:
-            findings.append(
-                {
-                    "severity": "info",
-                    "rule": "python-print",
-                    "message": "print statement detected",
-                }
-            )
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Call):
+            if getattr(node.func, "id", None) == "eval":
+                findings.append(
+                    {
+                        "severity": "high",
+                        "rule": "python-eval-usage",
+                        "message": "Use of eval() detected",
+                        "line": node.lineno,
+                    }
+                )
 
-        if "eval(" in content:
-            findings.append(
-                {
-                    "severity": "high",
-                    "rule": "python-eval",
-                    "message": "eval usage detected",
-                }
-            )
+            if getattr(node.func, "id", None) == "print":
+                findings.append(
+                    {
+                        "severity": "low",
+                        "rule": "debug-print",
+                        "message": "print() detected",
+                        "line": node.lineno,
+                    }
+                )
 
-        if "import pdb" in content or "breakpoint(" in content:
-            findings.append(
-                {
-                    "severity": "warning",
-                    "rule": "python-debugger",
-                    "message": "debugger usage detected",
-                }
-            )
+        if isinstance(node, ast.Import):
+            for name in node.names:
+                if name.name == "pdb":
+                    findings.append(
+                        {
+                            "severity": "medium",
+                            "rule": "debugger-import",
+                            "message": "pdb imported",
+                            "line": node.lineno,
+                        }
+                    )
+
+    return findings
+
+
+def respond(payload):
+    print(json.dumps(payload), flush=True)
+
+
+def handle_request(req):
+    if req.get("method") == "hello":
+        return {
+            "protocol_version": req.get("protocol_version", PROTOCOL_VERSION),
+            "request_id": req.get("request_id", ""),
+            "status": "ok",
+            "findings": [],
+        }
+
+    if req.get("method") == "analyze_file" and "params" in req:
+        params = req.get("params") or {}
+        path = params.get("path", "")
+        content = params.get("content", "")
+        return {
+            "protocol_version": req.get("protocol_version", PROTOCOL_VERSION),
+            "request_id": req.get("request_id", ""),
+            "status": "ok",
+            "findings": analyze(content),
+            "path": path,
+        }
 
     return {
-        "protocol_version": request.get("protocol_version", "0.1.0"),
-        "request_id": request.get("request_id", ""),
-        "status": "ok",
-        "findings": findings,
+        "protocol_version": req.get("protocol_version", PROTOCOL_VERSION),
+        "request_id": req.get("request_id", ""),
+        "status": "error",
+        "error": "unknown request",
+        "findings": [],
     }
 
 
 def main():
-    if sys.stdin.isatty():
-        print(json.dumps(ready_payload()))
-        return
-
-    raw = sys.stdin.read()
-
-    if not raw.strip():
-        print(json.dumps(ready_payload()))
-        return
-
-    try:
-        request = json.loads(raw)
-    except json.JSONDecodeError as exc:
-        print(
-            json.dumps(
+    for raw in sys.stdin:
+        raw = raw.strip()
+        if not raw:
+            continue
+        try:
+            req = json.loads(raw)
+            respond(handle_request(req))
+        except Exception as err:
+            respond(
                 {
-                    "protocol_version": "0.1.0",
+                    "protocol_version": PROTOCOL_VERSION,
                     "request_id": "",
                     "status": "error",
-                    "error": f"invalid json: {exc}",
                     "findings": [],
+                    "error": str(err),
                 }
             )
-        )
-        return
-
-    method = request.get("method")
-
-    if method == "analyze_file":
-        print(json.dumps(analyze_file(request)))
-        return
-
-    print(
-        json.dumps(
-            {
-                "protocol_version": request.get("protocol_version", "0.1.0"),
-                "request_id": request.get("request_id", ""),
-                "status": "error",
-                "error": f"unsupported method: {method}",
-                "findings": [],
-            }
-        )
-    )
 
 
 if __name__ == "__main__":
