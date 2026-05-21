@@ -3,10 +3,12 @@ use serde::{Deserialize, Serialize};
 
 use crate::Finding;
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(tag = "type", rename_all = "snake_case")]
 #[serde(deny_unknown_fields)]
 pub enum ProviderConfig {
+    #[default]
+    #[serde(rename = "disabled")]
     Disabled,
     Mock {
         #[serde(default = "mock_message_default")]
@@ -217,12 +219,6 @@ fn analyze_with_ollama(provider: &OllamaProvider, request: &AiRequest) -> Result
     }
 
     Ok(findings)
-}
-
-impl Default for ProviderConfig {
-    fn default() -> Self {
-        ProviderConfig::Disabled
-    }
 }
 
 #[derive(Debug, Clone)]

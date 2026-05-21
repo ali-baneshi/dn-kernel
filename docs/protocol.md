@@ -1,6 +1,8 @@
 # Worker Protocol
 
-The Python worker protocol is newline-delimited JSON over stdio.
+Workers communicate with the runtime through a simple protocol.
+
+The Python worker uses newline-delimited JSON over stdio.
 The runtime uses the shared request/response shape from `crates/dn-ipc`:
 
 - request: `WorkerRequest`
@@ -48,6 +50,33 @@ The runtime uses the shared request/response shape from `crates/dn-ipc`:
 2. Runtime sends one `hello` request once per process lifecycle.
 3. For each suspicious file, runtime sends `analyze_file` requests.
 4. Worker parses each request and writes back one JSON response per request.
+
+## C Worker Protocol
+
+The C worker uses a simpler command-line interface:
+
+### Invocation
+
+```bash
+./dn-worker-c <file.c>
+```
+
+### Output format
+
+```json
+{
+  "file": "example.c",
+  "issues": [
+    {
+      "rule": "line-length",
+      "severity": "warning",
+      "message": "Line exceeds 80 characters (95 characters)",
+      "line": 10,
+      "column": 1
+    }
+  ]
+}
+```
 
 ## Versioning and compatibility
 

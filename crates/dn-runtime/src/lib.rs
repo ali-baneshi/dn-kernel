@@ -43,18 +43,13 @@ impl Default for ScanOptions {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(rename_all = "kebab-case")]
 pub enum OutputFormat {
+    #[default]
     Text,
     Json,
     Markdown,
-}
-
-impl Default for OutputFormat {
-    fn default() -> Self {
-        Self::Text
-    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -375,9 +370,7 @@ impl RuntimeProfile {
                 }
             },
             file_selection: FileSelectionConfig {
-                include_hidden: if self.file_selection.include_hidden {
-                    true
-                } else if self.include_hidden.unwrap_or(false) {
+                include_hidden: if self.file_selection.include_hidden || self.include_hidden.unwrap_or(false) {
                     true
                 } else {
                     parent.file_selection.include_hidden
@@ -455,10 +448,10 @@ impl RuntimeProfile {
         }
     }
 
-    fn to_effective(self) -> EffectiveProfile {
+    fn to_effective(&self) -> EffectiveProfile {
         EffectiveProfile {
-            name: self.name,
-            description: self.description,
+            name: self.name.clone(),
+            description: self.description.clone(),
             enabled_rules: self.rules.deterministic_rules,
             suspicious_patterns: self.rules.suspicious_patterns,
             prioritize_rules: self.rules.prioritize,
@@ -552,11 +545,10 @@ fn builtin_profile(name: &str) -> Option<RuntimeProfile> {
                 max_total_bytes: 120 * 1024 * 1024,
                 max_files: 20000,
             },
-            ai: {
-                let mut ai = ProfileAiConfig::default();
-                ai.enabled = true;
-                ai.max_ai_files = 80;
-                ai
+            ai: ProfileAiConfig {
+                enabled: true,
+                max_ai_files: 80,
+                ..Default::default()
             },
             ..base
         }),
@@ -643,25 +635,23 @@ fn builtin_profile(name: &str) -> Option<RuntimeProfile> {
                 include_content_preview: true,
                 severity_threshold: "low".to_string(),
             },
-            ai: {
-                let mut ai = ProfileAiConfig::default();
-                ai.enabled = true;
-                ai.max_ai_files = 120;
-                ai.max_content_chars = 8 * 1024;
-                ai
+            ai: ProfileAiConfig {
+                enabled: true,
+                max_ai_files: 120,
+                max_content_chars: 8 * 1024,
+                ..Default::default()
             },
             ..base
         }),
         "educational" => Some(RuntimeProfile {
             name: name.to_string(),
             description: "Educational profile with guidance focus".to_string(),
-            ai: {
-                let mut ai = ProfileAiConfig::default();
-                ai.enabled = true;
-                ai.provider = provider::ProviderConfig::Mock {
+            ai: ProfileAiConfig {
+                enabled: true,
+                provider: provider::ProviderConfig::Mock {
                     message: "Explainability guidance requested by educational profile".to_string(),
-                };
-                ai
+                },
+                ..Default::default()
             },
             ..base
         }),
@@ -884,8 +874,8 @@ fn run_local_rules(content: &str, profile: &EffectiveProfile) -> Vec<Finding> {
 }
 
 fn severity_threshold_met(finding: &Finding, threshold: &str) -> bool {
-    let t = severity_rank(&normalize_severity(threshold));
-    let s = severity_rank(&normalize_severity(&finding.severity));
+    let t = severity_rank(normalize_severity(threshold));
+    let s = severity_rank(normalize_severity(&finding.severity));
     s >= t
 }
 
@@ -1233,13 +1223,13 @@ pub fn scan_repository(root: impl AsRef<Path>, options: &ScanOptions) -> Result<
                 }
 
                 findings.retain(|finding| {
-                    profile.prioritize_rules.iter().any(|p| finding.rule == *p)
+                    profile.prioritize_rules.contains(&finding.rule)
                         || severity_threshold_met(finding, &profile.severity_threshold)
                 });
 
                 findings.sort_by(|a, b| {
-                    severity_rank(&normalize_severity(&b.severity))
-                        .cmp(&severity_rank(&normalize_severity(&a.severity)))
+                    severity_rank(normalize_severity(&b.severity))
+                        .cmp(&severity_rank(normalize_severity(&a.severity)))
                 });
             }
             Err(err) => errors.push(format!("read {}: {err}", rel_path)),

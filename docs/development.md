@@ -41,6 +41,18 @@ python -m pip install -r requirements.txt
 python dn_worker/__main__.py
 ```
 
+## C worker development
+
+```bash
+cd workers/c
+make
+./dn-worker-c test_sample.c
+```
+
+To clean and rebuild:
+```bash
+make clean && make
+```
 ## Optional helpers
 
 - `make setup` creates a virtualenv and installs worker dependencies.

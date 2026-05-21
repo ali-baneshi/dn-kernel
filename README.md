@@ -207,7 +207,11 @@ This includes a limited preview in scan results.
 
 `dn-kernel` has two optional extension layers:
 
-- **worker layer**: external language-aware analysis, currently centered on Python worker support
+- **worker layer**: external language-aware analysis
+  - **Python worker**: AST-based analysis for Python code
+  - **C worker**: Linux kernel coding style checks (checkpatch.pl rules)
+    - Offline, no network dependencies
+    - Implements 5 key kernel style rules (line-length, space-before-tab, trailing-whitespace, keyword-spacing, brace-style)
 - **provider layer**: AI-style or provider-backed review flows
 
 Current provider states include:
